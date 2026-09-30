@@ -1,0 +1,5 @@
+metadrive-simulator==0.4.3
+numpy
+pygame
+gymnasium
+panda3d==1.10.13
