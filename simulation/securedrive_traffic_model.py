@@ -6,17 +6,14 @@ import time
 class SecureDriveTrafficModel:
 
     MAX_DETECTION_DISTANCE = 80.0
-
     SAFE_FRONT_DISTANCE = 18.0
     SAFE_REAR_DISTANCE = 15.0
     CRITICAL_DISTANCE = 5.5
-
     LANE_CHANGE_TRIGGER_DISTANCE = 32.0
     MIN_OVERTAKE_SPEED_DIFFERENCE = 2.0
-
     CONFIRMATION_FRAMES = 2
+    MIN_LANE_CHANGE_GAIN = 6.0
     MAX_LANE_CHANGE_TIME = 6.0
-
     FOLLOW_TIME_HEADWAY = 1.5
     MIN_FOLLOW_DISTANCE = 8.0
     EMERGENCY_TTC = 1.0
@@ -115,7 +112,6 @@ class SecureDriveTrafficModel:
         )
 
         ego_speed = self._get_speed(vehicle)
-
         front_vehicle = traffic["front_vehicle"]
 
         if front_vehicle is not None:
@@ -204,12 +200,39 @@ class SecureDriveTrafficModel:
 
             self.lane_change_time += delta_time
 
+            target_lane_safe, target_front_distance, target_front_speed = (
+                self._target_lane_gap_status(
+                    vehicle,
+                    current_lane,
+                    traffic,
+                    ego_speed
+                )
+            )
+
             if (
                 front_vehicle is not None
                 and front_distance <= self._emergency_distance(ego_speed)
             ):
                 self.last_decision = "LANE_CHANGE_EMERGENCY_BRAKE"
                 return self._emergency_brake(base_action)
+
+            if not target_lane_safe:
+                self.last_decision = "LANE_CHANGE_TARGET_UNSAFE"
+
+                if target_front_distance <= self._emergency_distance(ego_speed):
+                    return self._emergency_brake(base_action)
+
+                if target_front_distance <= self._desired_follow_distance(ego_speed):
+                    return self._follow_action(
+                        vehicle,
+                        target_front_distance,
+                        target_front_speed,
+                        base_action,
+                        ego_speed
+                    )
+
+                action = self._normal_action(base_action)
+                return [action[0], min(action[1], 0.0)]
 
             if self._target_lane_reached(vehicle):
 
@@ -254,7 +277,6 @@ class SecureDriveTrafficModel:
             return self._normal_action(base_action)
 
         desired_distance = self._desired_follow_distance(ego_speed)
-
         emergency_distance = self._emergency_distance(ego_speed)
 
         if front_distance <= emergency_distance:
@@ -315,8 +337,6 @@ class SecureDriveTrafficModel:
                 base_action,
                 ego_speed
             )
-
-        self.blocked_frames = 0
 
         self.last_decision = "CRUISE"
 
@@ -463,9 +483,13 @@ class SecureDriveTrafficModel:
 
         left_front_distance = float("inf")
         left_rear_distance = float("inf")
+        left_front_vehicle = None
+        left_rear_vehicle = None
 
         right_front_distance = float("inf")
         right_rear_distance = float("inf")
+        right_front_vehicle = None
+        right_rear_vehicle = None
 
         for obj in objects:
 
@@ -542,31 +566,23 @@ class SecureDriveTrafficModel:
 
             elif best_name == "left":
 
-                if distance > 0:
-                    left_front_distance = min(
-                        left_front_distance,
-                        distance
-                    )
+                if distance > 0 and distance < left_front_distance:
+                    left_front_distance = distance
+                    left_front_vehicle = obj
 
-                elif distance < 0:
-                    left_rear_distance = min(
-                        left_rear_distance,
-                        abs(distance)
-                    )
+                elif distance < 0 and abs(distance) < left_rear_distance:
+                    left_rear_distance = abs(distance)
+                    left_rear_vehicle = obj
 
             elif best_name == "right":
 
-                if distance > 0:
-                    right_front_distance = min(
-                        right_front_distance,
-                        distance
-                    )
+                if distance > 0 and distance < right_front_distance:
+                    right_front_distance = distance
+                    right_front_vehicle = obj
 
-                elif distance < 0:
-                    right_rear_distance = min(
-                        right_rear_distance,
-                        abs(distance)
-                    )
+                elif distance < 0 and abs(distance) < right_rear_distance:
+                    right_rear_distance = abs(distance)
+                    right_rear_vehicle = obj
 
         return {
             "front_vehicle": front_vehicle,
@@ -574,9 +590,13 @@ class SecureDriveTrafficModel:
 
             "left_front_distance": left_front_distance,
             "left_rear_distance": left_rear_distance,
+            "left_front_vehicle": left_front_vehicle,
+            "left_rear_vehicle": left_rear_vehicle,
 
             "right_front_distance": right_front_distance,
             "right_rear_distance": right_rear_distance,
+            "right_front_vehicle": right_front_vehicle,
+            "right_rear_vehicle": right_rear_vehicle,
 
             "left_lane": adjacent["left"],
             "right_lane": adjacent["right"]
@@ -622,58 +642,225 @@ class SecureDriveTrafficModel:
         candidates = []
 
         ego_speed = self._get_speed(vehicle)
+        ego_speed_ms = max(0.0, ego_speed / 3.6)
 
-        safe_front = max(
+        current_front = self._safe_distance(
+            traffic["front_distance"]
+        )
+
+        base_front_gap = max(
             self.SAFE_FRONT_DISTANCE,
             self._desired_follow_distance(ego_speed)
         )
 
-        safe_rear = max(
+        base_rear_gap = max(
             self.SAFE_REAR_DISTANCE,
-            8.0 + (ego_speed / 3.6) * 0.8
+            8.0 + ego_speed_ms * 0.8
         )
 
-        left_lane = traffic["left_lane"]
-        right_lane = traffic["right_lane"]
+        lane_options = (
+            (
+                "left",
+                traffic["left_lane"],
+                traffic["left_front_distance"],
+                traffic["left_rear_distance"],
+                traffic.get("left_front_vehicle"),
+                traffic.get("left_rear_vehicle")
+            ),
+            (
+                "right",
+                traffic["right_lane"],
+                traffic["right_front_distance"],
+                traffic["right_rear_distance"],
+                traffic.get("right_front_vehicle"),
+                traffic.get("right_rear_vehicle")
+            )
+        )
 
-        if left_lane is not None:
+        for name, lane, front_raw, rear_raw, front_vehicle, rear_vehicle in lane_options:
 
-            front = self._safe_distance(
-                traffic["left_front_distance"]
+            if lane is None:
+                continue
+
+            front = self._safe_distance(front_raw)
+            rear = self._safe_distance(rear_raw)
+
+            front_speed = (
+                self._get_speed(front_vehicle)
+                if front_vehicle is not None
+                else ego_speed
             )
 
-            rear = self._safe_distance(
-                traffic["left_rear_distance"]
+            rear_speed = (
+                self._get_speed(rear_vehicle)
+                if rear_vehicle is not None
+                else ego_speed
             )
 
-            if self._lane_is_safe(front, rear, safe_front, safe_rear):
-                candidates.append((left_lane, front, rear))
-
-        if right_lane is not None:
-
-            front = self._safe_distance(
-                traffic["right_front_distance"]
+            front_closing_speed = max(
+                0.0,
+                (ego_speed - front_speed) / 3.6
             )
 
-            rear = self._safe_distance(
-                traffic["right_rear_distance"]
+            rear_closing_speed = max(
+                0.0,
+                (rear_speed - ego_speed) / 3.6
             )
 
-            if self._lane_is_safe(front, rear, safe_front, safe_rear):
-                candidates.append((right_lane, front, rear))
+            required_front = max(
+                base_front_gap,
+                base_front_gap + front_closing_speed * 1.5
+            )
+
+            required_rear = max(
+                base_rear_gap,
+                base_rear_gap + rear_closing_speed * 2.0
+            )
+
+            required_front = max(
+                required_front,
+                min(
+                    self.MAX_DETECTION_DISTANCE,
+                    current_front + self.MIN_LANE_CHANGE_GAIN
+                )
+            )
+
+            if not self._lane_is_safe(
+                front,
+                rear,
+                required_front,
+                required_rear
+            ):
+                continue
+
+            front_ttc = (
+                front / front_closing_speed
+                if front_closing_speed > 0.1
+                else float("inf")
+            )
+
+            rear_ttc = (
+                rear / rear_closing_speed
+                if rear_closing_speed > 0.1
+                else float("inf")
+            )
+
+            if front_ttc < 2.0 or rear_ttc < 2.0:
+                continue
+
+            score = (
+                min(front, self.MAX_DETECTION_DISTANCE)
+                - max(0.0, required_rear - rear) * 0.5
+                - front_closing_speed * 2.0
+                - rear_closing_speed * 2.5
+            )
+
+            candidates.append((lane, score))
 
         if not candidates:
             return None
 
-        candidates.sort(
-            key=lambda item: (
-                min(item[1], self.MAX_DETECTION_DISTANCE)
-                - max(0.0, safe_rear - item[2]) * 0.5
-            ),
-            reverse=True
+        candidates.sort(key=lambda item: item[1], reverse=True)
+        return candidates[0][0]
+
+    def _target_lane_gap_status(
+        self,
+        vehicle,
+        current_lane,
+        traffic,
+        ego_speed
+    ):
+
+        if self.target_lane is None:
+            return True, self.MAX_DETECTION_DISTANCE + 1.0, ego_speed
+
+        if self.target_lane is traffic.get("left_lane"):
+
+            front_distance = self._safe_distance(
+                traffic.get("left_front_distance")
+            )
+
+            rear_distance = self._safe_distance(
+                traffic.get("left_rear_distance")
+            )
+
+            front_vehicle = traffic.get("left_front_vehicle")
+            rear_vehicle = traffic.get("left_rear_vehicle")
+
+        elif self.target_lane is traffic.get("right_lane"):
+
+            front_distance = self._safe_distance(
+                traffic.get("right_front_distance")
+            )
+
+            rear_distance = self._safe_distance(
+                traffic.get("right_rear_distance")
+            )
+
+            front_vehicle = traffic.get("right_front_vehicle")
+            rear_vehicle = traffic.get("right_rear_vehicle")
+
+        else:
+            return True, self.MAX_DETECTION_DISTANCE + 1.0, ego_speed
+
+        front_speed = (
+            self._get_speed(front_vehicle)
+            if front_vehicle is not None
+            else ego_speed
         )
 
-        return candidates[0][0]
+        rear_speed = (
+            self._get_speed(rear_vehicle)
+            if rear_vehicle is not None
+            else ego_speed
+        )
+
+        ego_speed_ms = max(0.0, ego_speed / 3.6)
+
+        front_closing = max(
+            0.0,
+            (ego_speed - front_speed) / 3.6
+        )
+
+        rear_closing = max(
+            0.0,
+            (rear_speed - ego_speed) / 3.6
+        )
+
+        required_front = max(
+            self.SAFE_FRONT_DISTANCE,
+            self._desired_follow_distance(ego_speed)
+        ) + front_closing * 1.5
+
+        required_rear = max(
+            self.SAFE_REAR_DISTANCE,
+            8.0 + ego_speed_ms * 0.8
+        ) + rear_closing * 2.0
+
+        front_ttc = (
+            front_distance / front_closing
+            if front_closing > 0.1
+            else float("inf")
+        )
+
+        rear_ttc = (
+            rear_distance / rear_closing
+            if rear_closing > 0.1
+            else float("inf")
+        )
+
+        safe = (
+            self._lane_is_safe(
+                front_distance,
+                rear_distance,
+                required_front,
+                required_rear
+            )
+            and front_ttc >= 1.5
+            and rear_ttc >= 1.5
+        )
+
+        return safe, front_distance, front_speed
 
     def _lane_is_safe(
         self,
@@ -783,10 +970,8 @@ class SecureDriveTrafficModel:
             return [0.0, 0.0]
 
         try:
-
             steering = float(base_action[0])
             throttle_brake = float(base_action[1])
-
         except Exception:
             return [0.0, 0.0]
 
@@ -797,8 +982,6 @@ class SecureDriveTrafficModel:
 
     def _lane_change_action(self, base_action):
 
-        # Preserve the autopilot's throttle/brake command.
-        # Never force acceleration during a lane change.
         return self._normal_action(base_action)
 
     def _follow_action(
@@ -828,8 +1011,6 @@ class SecureDriveTrafficModel:
         )
 
         relative_speed_ms = relative_speed / 3.6
-
-        ego_speed_ms = max(0.0, ego_speed / 3.6)
 
         desired_distance = self._desired_follow_distance(
             ego_speed
@@ -871,8 +1052,6 @@ class SecureDriveTrafficModel:
                 min(current_acceleration, braking)
             ]
 
-        # Vehicles farther ahead should not trigger abrupt
-        # braking, but acceleration is limited when closing.
         if front_distance <= desired_distance + 12.0:
 
             if relative_speed > 3.0:
@@ -965,7 +1144,6 @@ class SecureDriveTrafficModel:
             pass
 
         try:
-
             velocity = vehicle.velocity
 
             return math.hypot(
@@ -979,7 +1157,6 @@ class SecureDriveTrafficModel:
     def _distance(self, vehicle_a, vehicle_b):
 
         try:
-
             a = vehicle_a.position
             b = vehicle_b.position
 
@@ -1028,7 +1205,6 @@ class SecureDriveTrafficModel:
     def _safe_number(value, fallback=0.0):
 
         try:
-
             result = float(value)
 
             if math.isfinite(result):
@@ -1042,7 +1218,6 @@ class SecureDriveTrafficModel:
     def _safe_distance(self, value):
 
         try:
-
             result = float(value)
 
             if not math.isfinite(result):

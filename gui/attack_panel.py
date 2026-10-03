@@ -1,3 +1,4 @@
+
 import math
 import os
 
@@ -17,7 +18,6 @@ from panda3d.core import (
 
 class AttackPanel:
 
-    # (button label, attack name)
     ATTACKS = [
         ("CAN Injection", "SUDDEN_ACCELERATION"),
         ("CAN Message Injection", "SUDDEN_BRAKING"),
@@ -32,7 +32,6 @@ class AttackPanel:
     ]
 
     COLORS = {
-        # matches the reference picture
         "button": (0.086, 0.137, 0.184, 1.0),
         "hover": (0.125, 0.200, 0.265, 1.0),
         "active": (0.560, 0.075, 0.095, 1.0),
@@ -45,7 +44,6 @@ class AttackPanel:
         "transparent": (0, 0, 0, 0)
     }
 
-    # Rounded-button texture density (texels per aspect2d unit)
     TEXELS_PER_UNIT = 400.0
 
     def __init__(self, engine, attack_engine):
@@ -89,7 +87,6 @@ class AttackPanel:
             return 1.777
 
     def load_font(self):
-        """Bold sans-serif font like the reference. Falls back to default."""
 
         fonts_dir = os.path.join(
             os.environ.get("WINDIR", "C:/Windows"),
@@ -124,7 +121,6 @@ class AttackPanel:
         return {"text_font": self.font}
 
     def create_button_texture(self, width, height, radius):
-        """Anti-aliased rounded rectangle (white, alpha-masked)."""
 
         px = self.TEXELS_PER_UNIT
 
@@ -196,7 +192,6 @@ class AttackPanel:
             corner_radius
         )
 
-        # Title (top-left, above the first row)
         separator = "·" if self.font is not None else "|"
 
         self.title = DirectLabel(
@@ -212,9 +207,7 @@ class AttackPanel:
             **self.font_args()
         )
 
-        for index, (label, attack_name) in enumerate(
-            self.ATTACKS
-        ):
+        for index, (label, attack_name) in enumerate(self.ATTACKS):
 
             row = index // 5
             column = index % 5
@@ -507,12 +500,8 @@ class AttackPanel:
         except Exception:
             lane_offset = 0.0
 
-        if self.attack_engine.is_recovering():
-            status = "RECOVERY"
-
-        elif self.attack_engine.is_attack_active():
+        if self.attack_engine.is_attack_active():
             status = "ATTACK ACTIVE"
-
         else:
             status = "NORMAL"
 
@@ -576,11 +565,15 @@ class AttackPanel:
 
     def stop_attack(self):
 
-        self.attack_engine.deactivate(recover=True)
+        self.attack_engine.deactivate(recover=False)
+
+        self.previous_speed = None
+        self.previous_time = None
 
         self.update_status()
 
-        print("[SECUREDRIVE-AI] ATTACK STOPPED — RECOVERY REQUESTED")
+        print("[SECUREDRIVE-AI] ATTACK STOPPED")
+        print("[SECUREDRIVE-AI] NORMAL AUTOPILOT CONTROL RESTORED")
 
     def update_status(self):
 
